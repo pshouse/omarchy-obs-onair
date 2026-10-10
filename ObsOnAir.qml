@@ -38,6 +38,8 @@ BarWidget {
   property var twitch: null
   property var viewers: null
   property bool hovered: false
+  // The bar only shows a tooltip while its target reports tooltipHovered.
+  readonly property bool tooltipHovered: hovered && active
 
   readonly property bool brb: active && brbScenes.indexOf(scene) !== -1
   readonly property string mode: !active ? "off" : reconnecting ? "reconnecting" : brb ? "brb" : "live"
@@ -59,7 +61,6 @@ BarWidget {
   function tooltipText() {
     var dropPct = totalFrames > 0 ? (skipped / totalFrames * 100).toFixed(2) : "0.00"
     return "Scene: " + (scene || "?") +
-      "\nElapsed: " + formatDuration(elapsedMs) +
       "\nBitrate: " + bitrateKbps + " kb/s" +
       "\nDropped: " + skipped + " frames (" + dropPct + "%)" +
       (hasCount(youtube) ? "\nYouTube viewers: " + youtube : "") +
@@ -154,15 +155,13 @@ BarWidget {
     onTriggered: root.refreshViewers()
   }
 
-  // Ticks the clock between polls; also keeps an open tooltip current.
+  // Ticks the clock between polls. The tooltip is a snapshot taken on hover:
+  // re-sending it restarts the bar's show delay, which would make it flicker.
   Timer {
     interval: 1000
     running: root.active
     repeat: true
-    onTriggered: {
-      root.now = Date.now()
-      if (root.hovered && root.bar) root.bar.showTooltip(root, root.tooltipText())
-    }
+    onTriggered: root.now = Date.now()
   }
 
   Rectangle {
@@ -217,14 +216,12 @@ BarWidget {
     }
   }
 
-  MouseArea {
-    anchors.fill: parent
-    hoverEnabled: true
-    acceptedButtons: Qt.NoButton
-    onEntered: {
-      root.hovered = true
-      if (root.bar) root.bar.showTooltip(root, root.tooltipText())
+  // A HoverHandler, not a MouseArea: the bar's slot puts its own drag/click
+  // MouseArea on top of every widget, which swallows ordinary hover events.
+  HoverHandler {
+    onHoveredChanged: {
+      root.hovered = hovered
+      if (hovered && root.bar) root.bar.showTooltip(root, root.tooltipText())
     }
-    onExited: root.hovered = false
   }
 }
