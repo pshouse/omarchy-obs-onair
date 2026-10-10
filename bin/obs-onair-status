@@ -19,8 +19,14 @@ import socket
 import struct
 import subprocess
 import sys
+import time
 
-TIMEOUT = 3
+# Hard limits so a misbehaving or impostor server on the port can't make the
+# helper hang or grow without bound: one deadline for the whole exchange, and
+# caps on the handshake and on any single message.
+DEADLINE_SECONDS = 3
+MAX_HANDSHAKE_BYTES = 16 * 1024
+MAX_MESSAGE_BYTES = 1024 * 1024
 
 
 def emit(data):
@@ -48,7 +54,8 @@ class WebSocket:
     """Just enough of RFC 6455 for a local text-message client."""
 
     def __init__(self, port):
-        self.sock = socket.create_connection(("127.0.0.1", port), timeout=TIMEOUT)
+        self.deadline = time.monotonic() + DEADLINE_SECONDS
+        self.sock = socket.create_connection(("127.0.0.1", port), timeout=DEADLINE_SECONDS)
         key = base64.b64encode(os.urandom(16)).decode()
         self.sock.sendall(
             (
@@ -63,7 +70,9 @@ class WebSocket:
         )
         response = b""
         while b"\r\n\r\n" not in response:
-            chunk = self.sock.recv(4096)
+            if len(response) > MAX_HANDSHAKE_BYTES:
+                raise ConnectionError("handshake too large")
+            chunk = self._recv_chunk()
             if not chunk:
                 raise ConnectionError("handshake closed")
             response += chunk
@@ -71,9 +80,18 @@ class WebSocket:
         if b" 101 " not in head.split(b"\r\n", 1)[0]:
             raise ConnectionError("handshake rejected")
 
+    def _recv_chunk(self):
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("deadline exceeded")
+        self.sock.settimeout(remaining)
+        return self.sock.recv(4096)
+
     def _read(self, n):
+        if n > MAX_MESSAGE_BYTES:
+            raise ConnectionError("frame too large")
         while len(self.buffer) < n:
-            chunk = self.sock.recv(4096)
+            chunk = self._recv_chunk()
             if not chunk:
                 raise ConnectionError("connection closed")
             self.buffer += chunk
@@ -116,6 +134,8 @@ class WebSocket:
                 continue
             if opcode in (0x0, 0x1):
                 message += payload
+                if len(message) > MAX_MESSAGE_BYTES:
+                    raise ConnectionError("message too large")
                 if first & 0x80:
                     return json.loads(message)
 
