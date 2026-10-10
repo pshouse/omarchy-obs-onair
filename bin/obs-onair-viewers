@@ -29,6 +29,15 @@ if [[ -r $CREDS ]]; then
   done <"$CREDS"
 fi
 
+# Secrets reach curl as a config on stdin (-K -), never as command-line
+# arguments, which other local users can read from /proc while curl runs.
+# printf is a builtin, so the values never appear in any process's argv.
+curl_opt() {
+  local value=${2//\\/\\\\}
+  value=${value//\"/\\\"}
+  printf '%s = "%s"\n' "$1" "$value"
+}
+
 youtube_viewers() {
   [[ -n $YOUTUBE_API_KEY && -n $YOUTUBE_CHANNEL_ID ]] || { echo "obs-onair-viewers: YouTube keys missing" >&2; return; }
   local api="https://www.googleapis.com/youtube/v3" video now last
@@ -41,10 +50,11 @@ youtube_viewers() {
     last=$(cat "$CACHE/yt-last-search" 2>/dev/null || echo 0)
     ((now - last < 120)) && return
     echo "$now" >"$CACHE/yt-last-search"
-    video=$(curl -fsS --max-time 10 -G "$api/search" \
-      --data-urlencode "part=id" --data-urlencode "channelId=$YOUTUBE_CHANNEL_ID" \
-      --data-urlencode "eventType=live" --data-urlencode "type=video" \
-      --data-urlencode "key=$YOUTUBE_API_KEY" | jq -r '.items[0].id.videoId // empty')
+    video=$(curl_opt data-urlencode "key=$YOUTUBE_API_KEY" |
+      curl -fsS --max-time 10 -K - -G "$api/search" \
+        --data-urlencode "part=id" --data-urlencode "channelId=$YOUTUBE_CHANNEL_ID" \
+        --data-urlencode "eventType=live" --data-urlencode "type=video" |
+      jq -r '.items[0].id.videoId // empty')
     [[ -n $video ]] || return
     echo "$video" >"$CACHE/yt-video"
   fi
@@ -52,9 +62,9 @@ youtube_viewers() {
   # YouTube omits concurrentViewers when nobody is watching, so a live video
   # without it means 0. A video that is no longer live is dropped from the cache.
   local resp
-  resp=$(curl -fsS --max-time 10 -G "$api/videos" \
-    --data-urlencode "part=liveStreamingDetails,snippet" --data-urlencode "id=$video" \
-    --data-urlencode "key=$YOUTUBE_API_KEY") || return
+  resp=$(curl_opt data-urlencode "key=$YOUTUBE_API_KEY" |
+    curl -fsS --max-time 10 -K - -G "$api/videos" \
+      --data-urlencode "part=liveStreamingDetails,snippet" --data-urlencode "id=$video") || return
   if [[ $(jq -r '.items[0].snippet.liveBroadcastContent // empty' <<<"$resp") != live ]]; then
     rm -f "$CACHE/yt-video"
     return
@@ -68,9 +78,10 @@ twitch_token() {
     jq -r .token "$file"
     return
   fi
-  resp=$(curl -fsS --max-time 10 -X POST https://id.twitch.tv/oauth2/token \
-    --data-urlencode "client_id=$TWITCH_CLIENT_ID" \
-    --data-urlencode "client_secret=$TWITCH_CLIENT_SECRET" \
+  resp=$({
+    curl_opt data-urlencode "client_id=$TWITCH_CLIENT_ID"
+    curl_opt data-urlencode "client_secret=$TWITCH_CLIENT_SECRET"
+  } | curl -fsS --max-time 10 -K - -X POST https://id.twitch.tv/oauth2/token \
     --data-urlencode "grant_type=client_credentials") || return
   (umask 077 && jq -c --argjson now "$(date +%s)" '{token: .access_token, expires: ($now + .expires_in)}' <<<"$resp" >"$file")
   jq -r .token "$file"
@@ -80,9 +91,11 @@ twitch_viewers() {
   [[ -n $TWITCH_CLIENT_ID && -n $TWITCH_CLIENT_SECRET && -n $TWITCH_LOGIN ]] || { echo "obs-onair-viewers: Twitch keys missing" >&2; return; }
   local token
   token=$(twitch_token) && [[ -n $token ]] || return
-  curl -fsS --max-time 10 -G https://api.twitch.tv/helix/streams \
-    --data-urlencode "user_login=$TWITCH_LOGIN" \
-    -H "Client-Id: $TWITCH_CLIENT_ID" -H "Authorization: Bearer $token" |
+  {
+    curl_opt header "Client-Id: $TWITCH_CLIENT_ID"
+    curl_opt header "Authorization: Bearer $token"
+  } | curl -fsS --max-time 10 -K - -G https://api.twitch.tv/helix/streams \
+    --data-urlencode "user_login=$TWITCH_LOGIN" |
     jq -r '.data[0].viewer_count // 0'
 }
 
