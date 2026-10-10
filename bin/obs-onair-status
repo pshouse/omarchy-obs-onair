@@ -1,0 +1,47 @@
+#!/bin/bash
+# Print OBS streaming state as one JSON line for the OBS On Air bar widget:
+# {active, reconnecting, durationMs, bytes, skipped, total, scene}
+# Talks to the local OBS through obs-cmd, using the websocket port and password
+# from OBS's own obs-websocket config. Prints {"active":false} whenever OBS isn't
+# running, isn't streaming, or can't be reached.
+off() { echo '{"active":false}'; exit 0; }
+
+pgrep -x obs >/dev/null || off
+command -v obs-cmd >/dev/null || off
+
+config=""
+for candidate in \
+  "${XDG_CONFIG_HOME:-$HOME/.config}/obs-studio/plugin_config/obs-websocket/config.json" \
+  "$HOME/.var/app/com.obsproject.Studio/config/obs-studio/plugin_config/obs-websocket/config.json"; do
+  [[ -r $candidate ]] && config=$candidate && break
+done
+[[ -n $config ]] || off
+
+port=$(jq -r '.server_port // 4455' "$config")
+password=$(jq -r 'if .auth_required == false then "" else .server_password // "" end' "$config")
+export OBS_WEBSOCKET_URL="obsws://localhost:$port/$password"
+
+status=$(timeout 3 obs-cmd streaming status 2>/dev/null) || off
+field() { sed -n "s/^ *$1: *//p" <<<"$status" | head -1; }
+number() { [[ $1 =~ ^[0-9]+$ ]] && echo "$1" || echo 0; }
+
+[[ $(field Active) == true ]] || off
+
+# Duration looks like 1h2m3s456ms (leading units omitted when zero)
+duration=$(field Duration)
+ms=0
+[[ $duration =~ ([0-9]+)h ]] && ((ms += BASH_REMATCH[1] * 3600000))
+[[ $duration =~ ([0-9]+)m[0-9] ]] && ((ms += BASH_REMATCH[1] * 60000))
+[[ $duration =~ ([0-9]+)s ]] && ((ms += BASH_REMATCH[1] * 1000))
+[[ $duration =~ s([0-9]+)ms ]] && ((ms += 10#${BASH_REMATCH[1]}))
+
+scene=$(timeout 3 obs-cmd scene current 2>/dev/null | sed -n 's/^Current scene: //p')
+
+jq -cn \
+  --argjson reconnecting "$([[ $(field Reconnecting) == true ]] && echo true || echo false)" \
+  --argjson durationMs "$ms" \
+  --argjson bytes "$(number "$(field 'Bytes sent')")" \
+  --argjson skipped "$(number "$(field 'Skipped frames')")" \
+  --argjson total "$(number "$(field 'Total frames')")" \
+  --arg scene "$scene" \
+  '{active: true, $reconnecting, $durationMs, $bytes, $skipped, $total, $scene}'

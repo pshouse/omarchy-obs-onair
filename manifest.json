@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.pshouse.obs-onair",
+  "name": "OBS On Air",
+  "version": "1.0.0",
+  "author": "Patrick Shouse",
+  "description": "A red ON AIR pill in the bar while OBS is streaming, with elapsed time, stream health, a BRB state, and optional YouTube/Twitch viewer counts",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "ObsOnAir.qml"
+  },
+  "barWidget": {
+    "displayName": "OBS On Air",
+    "description": "Shows ON AIR / BRB while OBS is streaming, with elapsed time and live viewers",
+    "category": "Media",
+    "allowMultiple": false,
+    "defaultSection": "center",
+    "defaults": {
+      "brbScenes": "Be right back, BRB",
+      "showViewers": true,
+      "viewerIntervalSec": 60,
+      "credentialsFile": ""
+    },
+    "schema": [
+      {
+        "key": "brbScenes",
+        "type": "string",
+        "label": "BRB scenes",
+        "defaultValue": "Be right back, BRB",
+        "description": "Comma-separated OBS scene names that show the amber BRB pill instead of ON AIR."
+      },
+      {
+        "key": "showViewers",
+        "type": "boolean",
+        "label": "Show viewer counts",
+        "defaultValue": true,
+        "description": "Needs YouTube and/or Twitch API credentials; see the README."
+      },
+      {
+        "key": "viewerIntervalSec",
+        "type": "integer",
+        "label": "Viewer refresh (seconds)",
+        "min": 30,
+        "max": 600,
+        "step": 30,
+        "defaultValue": 60
+      },
+      {
+        "key": "credentialsFile",
+        "type": "path",
+        "label": "Credentials file",
+        "defaultValue": "",
+        "description": "Optional. Defaults to ~/.config/obs-onair/credentials.env."
+      }
+    ]
+  }
+}

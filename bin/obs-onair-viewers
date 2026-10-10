@@ -1,0 +1,93 @@
+#!/bin/bash
+# Print live viewer counts as one JSON line for the OBS On Air bar widget:
+# {"youtube":N|null,"twitch":N|null,"total":N|null}. `--reset` forgets the cached
+# YouTube video ID (call when a stream ends). `--credentials FILE` overrides the
+# default credentials file. Platforms without credentials report null.
+CREDS="${XDG_CONFIG_HOME:-$HOME/.config}/obs-onair/credentials.env"
+if [[ $1 == --credentials ]]; then
+  [[ -n $2 ]] && CREDS=$2
+  shift 2
+fi
+CACHE="${XDG_RUNTIME_DIR:-/run/user/$UID}/obs-onair"
+mkdir -p "$CACHE" && chmod 700 "$CACHE"
+
+if [[ $1 == --reset ]]; then
+  rm -f "$CACHE/yt-video" "$CACHE/yt-last-search"
+  exit 0
+fi
+
+# Read only the known KEY=value lines; the file is never executed.
+if [[ -r $CREDS ]]; then
+  while IFS='=' read -r key value; do
+    value=${value%$'\r'}
+    value=${value#\"} value=${value%\"}
+    case $key in
+    YOUTUBE_API_KEY | YOUTUBE_CHANNEL_ID | TWITCH_CLIENT_ID | TWITCH_CLIENT_SECRET | TWITCH_LOGIN)
+      printf -v "$key" '%s' "$value"
+      ;;
+    esac
+  done <"$CREDS"
+fi
+
+youtube_viewers() {
+  [[ -n $YOUTUBE_API_KEY && -n $YOUTUBE_CHANNEL_ID ]] || { echo "obs-onair-viewers: YouTube keys missing" >&2; return; }
+  local api="https://www.googleapis.com/youtube/v3" video now last
+
+  # search.list costs 100 quota units, so look the live video up once per stream
+  # and retry at most every 2 minutes while YouTube catches up.
+  video=$(cat "$CACHE/yt-video" 2>/dev/null)
+  if [[ -z $video ]]; then
+    now=$(date +%s)
+    last=$(cat "$CACHE/yt-last-search" 2>/dev/null || echo 0)
+    ((now - last < 120)) && return
+    echo "$now" >"$CACHE/yt-last-search"
+    video=$(curl -fsS --max-time 10 -G "$api/search" \
+      --data-urlencode "part=id" --data-urlencode "channelId=$YOUTUBE_CHANNEL_ID" \
+      --data-urlencode "eventType=live" --data-urlencode "type=video" \
+      --data-urlencode "key=$YOUTUBE_API_KEY" | jq -r '.items[0].id.videoId // empty')
+    [[ -n $video ]] || return
+    echo "$video" >"$CACHE/yt-video"
+  fi
+
+  # YouTube omits concurrentViewers when nobody is watching, so a live video
+  # without it means 0. A video that is no longer live is dropped from the cache.
+  local resp
+  resp=$(curl -fsS --max-time 10 -G "$api/videos" \
+    --data-urlencode "part=liveStreamingDetails,snippet" --data-urlencode "id=$video" \
+    --data-urlencode "key=$YOUTUBE_API_KEY") || return
+  if [[ $(jq -r '.items[0].snippet.liveBroadcastContent // empty' <<<"$resp") != live ]]; then
+    rm -f "$CACHE/yt-video"
+    return
+  fi
+  jq -r '.items[0].liveStreamingDetails.concurrentViewers // 0' <<<"$resp"
+}
+
+twitch_token() {
+  local file="$CACHE/twitch-token" resp
+  if [[ -r $file ]] && (($(jq -r .expires "$file") > $(date +%s) + 60)); then
+    jq -r .token "$file"
+    return
+  fi
+  resp=$(curl -fsS --max-time 10 -X POST https://id.twitch.tv/oauth2/token \
+    --data-urlencode "client_id=$TWITCH_CLIENT_ID" \
+    --data-urlencode "client_secret=$TWITCH_CLIENT_SECRET" \
+    --data-urlencode "grant_type=client_credentials") || return
+  (umask 077 && jq -c --argjson now "$(date +%s)" '{token: .access_token, expires: ($now + .expires_in)}' <<<"$resp" >"$file")
+  jq -r .token "$file"
+}
+
+twitch_viewers() {
+  [[ -n $TWITCH_CLIENT_ID && -n $TWITCH_CLIENT_SECRET && -n $TWITCH_LOGIN ]] || { echo "obs-onair-viewers: Twitch keys missing" >&2; return; }
+  local token
+  token=$(twitch_token) && [[ -n $token ]] || return
+  curl -fsS --max-time 10 -G https://api.twitch.tv/helix/streams \
+    --data-urlencode "user_login=$TWITCH_LOGIN" \
+    -H "Client-Id: $TWITCH_CLIENT_ID" -H "Authorization: Bearer $token" |
+    jq -r '.data[0].viewer_count // 0'
+}
+
+yt=$(youtube_viewers)
+tw=$(twitch_viewers)
+jq -cn --arg yt "$yt" --arg tw "$tw" '
+  ($yt | tonumber? // null) as $y | ($tw | tonumber? // null) as $t |
+  {youtube: $y, twitch: $t, total: (if $y == null and $t == null then null else ($y // 0) + ($t // 0) end)}'
