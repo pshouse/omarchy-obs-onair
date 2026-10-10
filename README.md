@@ -27,15 +27,18 @@ Plugin id: `io.github.pshouse.obs-onair`
 
 ## Requirements
 
-- [OBS Studio](https://obsproject.com) with its built-in WebSocket server enabled
-  (OBS → Tools → WebSocket Server Settings → Enable WebSocket server).
-- [`obs-cmd`](https://github.com/grigio/obs-cmd) (AUR): `omarchy pkg aur add obs-cmd`
-- `jq` and `curl` (already on Omarchy).
+- [OBS Studio](https://obsproject.com) 28 or newer (the WebSocket server is built in).
+- Nothing else to install: `python3`, `jq` and `curl` are already present (Python is
+  a dependency of OBS itself).
+
+**One setting in OBS:** turn on Tools → WebSocket Server Settings → **Enable
+WebSocket server**. If OBS is running with it off, the widget sends a notification
+telling you exactly that, so you don't need to remember this step.
 
 The widget reads the WebSocket port and password from OBS's own config
 (`~/.config/obs-studio/plugin_config/obs-websocket/config.json`, or the Flatpak
-equivalent), so there's nothing to configure for local OBS. It only reads state from
-OBS and never changes it.
+equivalent), so there's nothing else to configure. It only sends read-only requests
+to OBS and never changes OBS or its config.
 
 ## Install
 
@@ -107,9 +110,10 @@ Set these in Setup → Bar, or with `omarchy bar set io.github.pshouse.obs-onair
 
 ## How it works
 
-- `bin/obs-onair-status` asks OBS for its streaming status and current scene with
-  `obs-cmd`, and prints one JSON line. The widget runs it every 2 seconds. When OBS
-  isn't running, it exits immediately without contacting anything.
+- `bin/obs-onair-status` is a small standard-library Python client for OBS's
+  WebSocket (v5) API. It sends two read-only requests, `GetStreamStatus` and
+  `GetCurrentProgramScene`, and prints one JSON line. The widget runs it every 2
+  seconds. When OBS isn't running, it exits immediately without contacting anything.
 - `bin/obs-onair-viewers` calls the YouTube and Twitch APIs and prints one JSON line.
   It runs only while you're live.
 - `ObsOnAir.qml` draws the pill and tooltip. Bitrate is calculated from the change in

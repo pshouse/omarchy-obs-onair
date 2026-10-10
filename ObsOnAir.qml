@@ -38,6 +38,9 @@ BarWidget {
   property var twitch: null
   property var viewers: null
   property bool hovered: false
+  // WebSocket problems are announced once, and again only after they clear.
+  property string websocketProblem: ""
+  property int websocketErrorPolls: 0
   // The bar only shows a tooltip while its target reports tooltipHovered.
   readonly property bool tooltipHovered: hovered && active
 
@@ -76,6 +79,7 @@ BarWidget {
     try { data = JSON.parse(String(output || "").trim()) } catch (e) { return }
     var wasActive = active
     active = data.active === true
+    checkWebsocket(data.websocket || "")
     if (!active) {
       if (wasActive) resetProc.running = true
       reconnecting = false; scene = ""; durationMs = 0; lastBytes = -1
@@ -93,6 +97,22 @@ BarWidget {
     skipped = data.skipped || 0
     totalFrames = data.total || 0
     if (!wasActive) refreshViewers()
+  }
+
+  function checkWebsocket(state) {
+    // OBS can refuse connections for a few seconds while it starts, so an
+    // error has to persist (~10s) before it's worth a notification.
+    websocketErrorPolls = state === "error" ? websocketErrorPolls + 1 : 0
+    var problem = state === "disabled" ? "disabled" : (websocketErrorPolls >= 5 ? "error" : "")
+    if (state === "error" && !problem) return
+    if (problem && problem !== websocketProblem) {
+      var body = problem === "disabled"
+        ? "Turn on the WebSocket server in OBS: Tools → WebSocket Server Settings → Enable WebSocket server."
+        : "Can't connect to the OBS WebSocket server. Check the port and password in OBS: Tools → WebSocket Server Settings."
+      notifyProc.command = ["notify-send", "-a", "OBS On Air", "OBS On Air", body]
+      notifyProc.running = true
+    }
+    websocketProblem = problem
   }
 
   function refreshViewers() {
@@ -119,7 +139,7 @@ BarWidget {
 
   Process {
     id: statusProc
-    command: ["bash", root.statusScript]
+    command: ["python3", "-I", root.statusScript]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.applyStatus(text)
@@ -133,6 +153,10 @@ BarWidget {
       waitForEnd: true
       onStreamFinished: root.applyViewers(text)
     }
+  }
+
+  Process {
+    id: notifyProc
   }
 
   Process {

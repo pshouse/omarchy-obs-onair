@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.pshouse.obs-onair",
   "name": "OBS On Air",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "author": "Patrick Shouse",
   "description": "A red ON AIR pill in the bar while OBS is streaming, with elapsed time, stream health, a BRB state, and optional YouTube/Twitch viewer counts",
   "kinds": [
