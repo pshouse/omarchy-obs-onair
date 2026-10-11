@@ -181,11 +181,20 @@ def main():
         if ws.recv().get("op") != 2:
             raise ConnectionError("not identified")
 
-        status = request(ws, "GetStreamStatus")
-        if not status.get("outputActive"):
+        stream_status = request(ws, "GetStreamStatus") or {}
+        try:
+            record_status = request(ws, "GetRecordStatus") or {}
+        except Exception:
+            record_status = {}
+
+        is_streaming = bool(stream_status.get("outputActive"))
+        is_recording = bool(record_status.get("outputActive"))
+
+        if not is_streaming and not is_recording:
             ws.close()
             emit({"active": False})
-        scene = request(ws, "GetCurrentProgramScene")
+
+        scene = request(ws, "GetCurrentProgramScene") or {}
         ws.close()
     except (OSError, ValueError, KeyError, ConnectionError):
         emit({"active": False, "websocket": "error"})
@@ -193,11 +202,16 @@ def main():
     emit(
         {
             "active": True,
-            "reconnecting": bool(status.get("outputReconnecting")),
-            "durationMs": int(status.get("outputDuration") or 0),
-            "bytes": int(status.get("outputBytes") or 0),
-            "skipped": int(status.get("outputSkippedFrames") or 0),
-            "total": int(status.get("outputTotalFrames") or 0),
+            "streaming": is_streaming,
+            "recording": is_recording,
+            "recordPaused": bool(record_status.get("outputPaused")),
+            "reconnecting": bool(stream_status.get("outputReconnecting")),
+            "durationMs": int(stream_status.get("outputDuration") or 0) if is_streaming else int(record_status.get("outputDuration") or 0),
+            "streamDurationMs": int(stream_status.get("outputDuration") or 0),
+            "recordDurationMs": int(record_status.get("outputDuration") or 0),
+            "bytes": int(stream_status.get("outputBytes") or 0) if is_streaming else int(record_status.get("outputBytes") or 0),
+            "skipped": int(stream_status.get("outputSkippedFrames") or 0),
+            "total": int(stream_status.get("outputTotalFrames") or 0),
             "scene": scene.get("sceneName") or scene.get("currentProgramSceneName") or "",
         }
     )

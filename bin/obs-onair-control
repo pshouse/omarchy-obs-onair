@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""Send control actions (toggle-pause, stop) to OBS via obs-websocket v5."""
+
+import base64
+import hashlib
+import json
+import os
+import socket
+import struct
+import subprocess
+import sys
+import time
+
+DEADLINE_SECONDS = 3
+MAX_HANDSHAKE_BYTES = 16 * 1024
+MAX_MESSAGE_BYTES = 1024 * 1024
+
+
+def obs_running():
+    return subprocess.run(["pgrep", "-x", "obs"], stdout=subprocess.DEVNULL).returncode == 0
+
+
+def websocket_config():
+    config_home = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    for base in (config_home, os.path.expanduser("~/.var/app/com.obsproject.Studio/config")):
+        path = os.path.join(base, "obs-studio/plugin_config/obs-websocket/config.json")
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+class WebSocket:
+    def __init__(self, port):
+        self.deadline = time.monotonic() + DEADLINE_SECONDS
+        self.sock = socket.create_connection(("127.0.0.1", port), timeout=DEADLINE_SECONDS)
+        key = base64.b64encode(os.urandom(16)).decode()
+        self.sock.sendall(
+            (
+                "GET / HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{port}\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                f"Sec-WebSocket-Key: {key}\r\n"
+                "Sec-WebSocket-Version: 13\r\n"
+                "Sec-WebSocket-Protocol: obswebsocket.json\r\n\r\n"
+            ).encode()
+        )
+        response = b""
+        while b"\r\n\r\n" not in response:
+            if len(response) > MAX_HANDSHAKE_BYTES:
+                raise ConnectionError("handshake too large")
+            chunk = self._recv_chunk()
+            if not chunk:
+                raise ConnectionError("handshake closed")
+            response += chunk
+        head, self.buffer = response.split(b"\r\n\r\n", 1)
+        if b" 101 " not in head.split(b"\r\n\r\n", 1)[0]:
+            raise ConnectionError("handshake rejected")
+
+    def _recv_chunk(self):
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("deadline exceeded")
+        self.sock.settimeout(remaining)
+        return self.sock.recv(4096)
+
+    def _read(self, n):
+        if n > MAX_MESSAGE_BYTES:
+            raise ConnectionError("frame too large")
+        while len(self.buffer) < n:
+            chunk = self._recv_chunk()
+            if not chunk:
+                raise ConnectionError("connection closed")
+            self.buffer += chunk
+        data, self.buffer = self.buffer[:n], self.buffer[n:]
+        return data
+
+    def _send_frame(self, opcode, payload):
+        header = bytes([0x80 | opcode])
+        length = len(payload)
+        if length < 126:
+            header += bytes([0x80 | length])
+        elif length < 65536:
+            header += bytes([0x80 | 126]) + struct.pack(">H", length)
+        else:
+            header += bytes([0x80 | 127]) + struct.pack(">Q", length)
+        mask = os.urandom(4)
+        masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+        self.sock.sendall(header + mask + masked)
+
+    def send(self, message):
+        self._send_frame(0x1, json.dumps(message).encode())
+
+    def recv(self):
+        message = b""
+        while True:
+            first, second = self._read(2)
+            opcode, length = first & 0x0F, second & 0x7F
+            if length == 126:
+                length = struct.unpack(">H", self._read(2))[0]
+            elif length == 127:
+                length = struct.unpack(">Q", self._read(8))[0]
+            mask = self._read(4) if second & 0x80 else None
+            payload = self._read(length)
+            if mask:
+                payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+            if opcode == 0x8:
+                raise ConnectionError("closed by OBS")
+            if opcode == 0x9:
+                self._send_frame(0xA, payload)
+                continue
+            if opcode in (0x0, 0x1):
+                message += payload
+                if len(message) > MAX_MESSAGE_BYTES:
+                    raise ConnectionError("message too large")
+                if first & 0x80:
+                    return json.loads(message)
+
+    def close(self):
+        try:
+            self._send_frame(0x8, b"")
+        except OSError:
+            pass
+        self.sock.close()
+
+
+def auth_string(password, salt, challenge):
+    secret = base64.b64encode(hashlib.sha256((password + salt).encode()).digest())
+    return base64.b64encode(hashlib.sha256(secret + challenge.encode()).digest()).decode()
+
+
+def request(ws, request_type, request_data=None):
+    payload = {"requestType": request_type, "requestId": request_type}
+    if request_data:
+        payload["requestData"] = request_data
+    ws.send({"op": 6, "d": payload})
+    while True:
+        message = ws.recv()
+        if message.get("op") == 7 and message["d"].get("requestId") == request_type:
+            return message["d"].get("responseData") or {}
+
+
+def main():
+    if len(sys.argv) < 2:
+        sys.exit(1)
+
+    action = sys.argv[1]
+    if not obs_running():
+        sys.exit(0)
+
+    config = websocket_config() or {}
+    try:
+        ws = WebSocket(int(config.get("server_port") or 4455))
+        hello = ws.recv()["d"]
+        identify = {"rpcVersion": 1, "eventSubscriptions": 0}
+        if hello.get("authentication"):
+            password = config.get("server_password") or ""
+            auth = hello["authentication"]
+            identify["authentication"] = auth_string(password, auth["salt"], auth["challenge"])
+        ws.send({"op": 1, "d": identify})
+        if ws.recv().get("op") != 2:
+            raise ConnectionError("not identified")
+
+        if action == "toggle-pause":
+            status = request(ws, "GetRecordStatus") or {}
+            if status.get("outputActive"):
+                request(ws, "ToggleRecordPause")
+        elif action == "stop":
+            status = request(ws, "GetRecordStatus") or {}
+            if status.get("outputActive"):
+                request(ws, "StopRecord")
+
+        ws.close()
+    except Exception:
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
